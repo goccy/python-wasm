@@ -1,0 +1,75 @@
+{
+  "version": "1.0",
+  "upstream": {
+    "path": "./cpython",
+    "commit": "c63aec69bd59c55314c06c23f4c22c03de76fe45",
+    "branch": "HEAD"
+  },
+  "project": {
+    "name": "python",
+    "root_dir": "./cpython",
+    "language": "c",
+    "language_standard": "c11"
+  },
+  "build_system": {
+    "type": "autotools",
+    "files": [
+      "cpython/configure",
+      "cpython/Makefile.pre.in",
+      "cpython/Tools/wasm/wasi/__main__.py"
+    ]
+  },
+  "targets": [
+    {
+      "name": "libpython3.14",
+      "type": "library",
+      "build_target": "libpython3.14.a",
+      "source_dirs": [
+        "cpython/Python",
+        "cpython/Objects",
+        "cpython/Parser",
+        "cpython/Modules"
+      ],
+      "description": "Static CPython 3.14 interpreter library (wasm32-wasi). The embedding API in embed/pyembed.h links against this."
+    },
+    {
+      "name": "python",
+      "type": "executable",
+      "build_target": "python.wasm",
+      "source_dirs": [
+        "cpython/Programs"
+      ],
+      "description": "Standalone python.wasm interpreter executable."
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "wasi-sdk",
+      "type": "tool",
+      "required": true
+    }
+  ],
+  "build_commands": {
+    "configure": "bash scripts/wasi-configure.sh",
+    "build": "make -C cross-build/wasm32-wasip1 --jobs $(nproc)"
+  },
+  "user_selection": {
+    "target_name": "libpython3.14",
+    "build_type": "library"
+  },
+  "bridge": {
+    "GoPackage": "github.com/goccy/go-python;python",
+    "Wasm2GoImportPath": "github.com/goccy/pythonwasm2go",
+    "HostSockets": true,
+    "HostSubprocess": true,
+    "StackSize": 8388608,
+    "ExportFunctions": [
+      "py_new",
+      "py_eval",
+      "py_close",
+      "py_eval_breaker_addr",
+      "py_async_exc_addr",
+      "py_keyboard_interrupt_obj"
+    ]
+  }
+}
