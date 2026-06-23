@@ -44,7 +44,7 @@ env:
   # Pinned to a released wasmify image. The cache image inherits this base layer
   # via `docker commit`, and the tag is baked into the cache key so a wasmify
   # upgrade rolls forward cleanly.
-  WASMIFY_IMAGE: ghcr.io/goccy/wasmify:v0.4.3
+  WASMIFY_IMAGE: ghcr.io/goccy/wasmify:v0.4.4
   CACHE_IMAGE: ghcr.io/${{ github.repository_owner }}/python-wasm-cache
 
 jobs:
