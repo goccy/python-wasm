@@ -35,3 +35,6 @@ go.work.sum
 /bridge/
 /build/
 /*.wasm
+# Generated stdlib zip (built from cpython/Lib by scripts/make-stdlib-zip.py
+# during release staging; published as a release asset, not committed).
+/python_stdlib.zip
