@@ -96,7 +96,7 @@ bundle-gomod:
 	echo "wrote $(WASM2GO_BUNDLE_DIR)/go.mod (module $$path)"
 
 # Drop everything wasmify regenerates so the next `make wasm` runs from scratch.
-# The committed inputs (wasmify.json, buf.{yaml,gen.yaml}, proto/wasmify, py.c, py.h,
+# The committed inputs (wasmify.json, buf.{yaml,gen.yaml}, proto/wasmify, py.cc, py.h,
 # patches/, scripts/, the cpython submodule) survive.
 wasm-clean:
 	rm -rf .wasmify api-spec.json build.json proto/python.proto bridge build \

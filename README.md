@@ -12,7 +12,7 @@ target both produce, from a clean checkout:
 
 | File | Where | What |
 | --- | --- | --- |
-| `python.wasm` | `.wasmify/wasm-build/output/python.wasm` | The wasi-sdk-built CPython interpreter (thin embedding API in `py.c`), optimised by binaryen wasm-opt. |
+| `python.wasm` | `.wasmify/wasm-build/output/python.wasm` | The wasi-sdk-built CPython interpreter (thin embedding API in `py.cc`), optimised by binaryen wasm-opt. |
 | `python_wasm2go.tar.gz` | `build/wasm2go/internal/wasm2go/` | The transpiled pure-Go bundle, a self-contained Go module (`github.com/goccy/pythonwasm2go`). go-python downloads and extracts it. |
 | `python_wasm2go.go` | `build/wasm2go/python.go` | `protoc-gen-wasmify-go`'s wasm2go bridge. |
 
@@ -27,7 +27,7 @@ cpython/                # git submodule pinned to the upstream commit we build a
 buf.yaml                # buf module
 buf.gen.yaml            # protoc-gen-wasmify-go invocation (wasm2go bundle)
 proto/wasmify/          # wasmify proto options the generated proto imports
-py.c, py.h              # the thin C embedding API (py_new / py_eval / ...) exported to the bridge
+py.cc, py.h             # the thin C++ embedding API (py_new / py_eval / ...) exported to the bridge
 patches/                # CPython source patches (host-provided posix_spawn)
 scripts/wasi-configure.sh   # the CPython-specific configure phase (host build-python + wasm cross-configure + pyconfig patches)
 ```

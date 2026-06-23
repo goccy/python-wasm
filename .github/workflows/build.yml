@@ -1,11 +1,11 @@
 name: build
 
-# End-to-end CI for python-wasm. Runs the wasmify pipeline against the upstream
-# `cpython/` submodule from a clean checkout, produces `python.wasm` (the
-# wasi-sdk-built CPython interpreter) and the wasm2go bundle (`build/wasm2go/`,
-# the transpiled pure-Go form go-python consumes), uploads them as artifacts,
-# attaches SLSA build-provenance attestations, and on a version tag publishes
-# them as GitHub Release assets.
+# Build + verify CI for python-wasm. Runs the wasmify pipeline against the
+# upstream `cpython/` submodule from a clean checkout, produces `python.wasm`
+# (the wasi-sdk-built CPython interpreter) and the wasm2go bundle
+# (`build/wasm2go/`, the transpiled pure-Go form go-python consumes), uploads
+# them as a workflow artifact, and attaches SLSA build-provenance attestations.
+# It does NOT publish a GitHub Release — release.yml owns that, on `v*` tags.
 #
 # Mirrors googlesql-wasm/.github/workflows/build.yml: the toolchain (wasi-sdk,
 # binaryen, buf, the wasmify CLI) lives inside the wasmify base image, so the
@@ -24,13 +24,18 @@ name: build
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+# This workflow only BUILDS and verifies (artifacts + provenance). It never
+# creates a GitHub Release — that is release.yml's job, gated to `v*` tags — so
+# pull requests and main pushes never publish. No `tags:` trigger here: a tag
+# push runs release.yml, which builds and releases in one place (no double
+# build, no race between two workflows uploading the same assets).
+
 permissions:
-  contents: write          # release asset upload on tags
+  contents: read           # build-only: no release asset upload here
   packages: write          # cache image push to ghcr
   id-token: write          # actions/attest-build-provenance OIDC token
   attestations: write
@@ -185,8 +190,11 @@ jobs:
         if: always()
         run: docker rm -f wasmify-build 2>/dev/null || true
 
-      - name: Stage release artifacts
-        # Per release:
+      - name: Stage build artifacts
+        # Collect the build outputs for upload-artifact + provenance. These are
+        # the SAME files release.yml publishes as Release assets on a tag; here
+        # they are only uploaded as a workflow artifact and attested — never
+        # attached to a GitHub Release.
         #   * python.wasm              — raw wasi-sdk artifact (binaryen-optimised).
         #   * python_wasm2go.go        — the wasm2go bridge (build/wasm2go/python.go).
         #   * python_wasm2go.tar.gz    — the build/wasm2go/internal/wasm2go bundle,
@@ -224,23 +232,3 @@ jobs:
         if: github.event_name == 'push' && github.event.repository.visibility == 'public'
         with:
           subject-checksums: release/python_wasm2go.sha256
-
-  release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: python-wasm-${{ github.sha }}
-          path: release
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release/python.wasm
-            release/python_wasm2go.go
-            release/python_wasm2go.tar.gz
-            release/python_wasm2go.sha256

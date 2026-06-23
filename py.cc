@@ -1,4 +1,4 @@
-/* py.c — implementation of the thin CPython embedding API (C++).
+/* py.cc — implementation of the thin CPython embedding API (C++).
  * Pinned against CPython v3.14.6. See py.h for the contract. */
 
 #include "py.h"

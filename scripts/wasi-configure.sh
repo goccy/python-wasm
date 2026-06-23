@@ -155,7 +155,7 @@ echo "== configuring wasi (by-name CC=clang CXX=clang++ AR=ar)"
 # Gated on the SAME opt-in as the bridge socket shim: wasmify.json's
 # bridge.HostSockets. When false (or absent), we leave HAVE_SOCKET etc. off so
 # socketmodule keeps CPython's ENOTSUP stubs and the wasm imports only standard
-# wasi (portable). When true, the bridge (py.c, compiled with
+# wasi (portable). When true, the bridge (py.cc, compiled with
 # -DWASMIFY_HOST_SOCKETS) supplies socket()/connect()/getaddrinfo() backed by
 # host imports, so we flip the macros on and add the prototypes + constants a
 # real <netdb.h> would (absent on wasip1). Keeping the two in sync avoids a
@@ -174,7 +174,7 @@ if [ "$HOST_SOCKETS_OPTIN" = "1" ] && [ -f "$PYCONFIG" ] && ! grep -q PYWASM_HOS
   cat >> "$PYCONFIG" <<'PYCONF_EOF'
 
 /* python-wasm: host-provided outbound socket API (definitions in the bridge,
- * py.c, calling host imports backed by Go's net package). wasi-libc
+ * py.cc, calling host imports backed by Go's net package). wasi-libc
  * omits these under __wasip1__; addrinfo.h omits the AI_ and EAI_ constants
  * once HAVE_GETADDRINFO is set. struct addrinfo still comes from CPython's
  * Modules/addrinfo.h. */
