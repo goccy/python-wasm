@@ -1,0 +1,22 @@
+diff --git a/Modules/posixmodule.c b/Modules/posixmodule.c
+index 69e28a1..0ee434f 100644
+--- a/Modules/posixmodule.c
++++ b/Modules/posixmodule.c
+@@ -6804,7 +6804,7 @@ os__exit_impl(PyObject *module, int status)
+ #define EXECV_CHAR char
+ #endif
+ 
+-#if defined(HAVE_EXECV) || defined(HAVE_SPAWNV) || defined(HAVE_RTPSPAWN)
++#if defined(HAVE_EXECV) || defined(HAVE_SPAWNV) || defined(HAVE_RTPSPAWN) || defined(HAVE_POSIX_SPAWN)
+ static void
+ free_string_array(EXECV_CHAR **array, Py_ssize_t count)
+ {
+@@ -6842,7 +6842,7 @@ fsconvert_strdup(PyObject *o, EXECV_CHAR **out)
+ }
+ #endif
+ 
+-#if defined(HAVE_EXECV) || defined (HAVE_FEXECVE) || defined(HAVE_RTPSPAWN)
++#if defined(HAVE_EXECV) || defined (HAVE_FEXECVE) || defined(HAVE_RTPSPAWN) || defined(HAVE_POSIX_SPAWN)
+ static EXECV_CHAR**
+ parse_envlist(PyObject* env, Py_ssize_t *envc_ptr)
+ {

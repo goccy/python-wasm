@@ -1,0 +1,39 @@
+diff --git a/Lib/subprocess.py b/Lib/subprocess.py
+index 52b7b71..2ffeed7 100644
+--- a/Lib/subprocess.py
++++ b/Lib/subprocess.py
+@@ -104,7 +104,11 @@
+ else:
+     if _can_fork_exec:
+         from _posixsubprocess import fork_exec as _fork_exec
+-        # used in methods that are called by __del__
++    # used in methods that are called by __del__. python-wasm: define these
++    # from the real os functions whenever the platform exposes waitpid (the
++    # host-subprocess posix_spawn path needs them), not only when fork/exec is
++    # available.
++    if hasattr(os, 'waitpid'):
+         class _del_safe:
+             waitpid = os.waitpid
+             waitstatus_to_exitcode = os.waitstatus_to_exitcode
+@@ -824,7 +828,7 @@ def __init__(self, args, bufsize=-1, executable=None,
+                  encoding=None, errors=None, text=None, umask=-1, pipesize=-1,
+                  process_group=None):
+         """Create new Popen instance."""
+-        if not _can_fork_exec:
++        if not _can_fork_exec and not _USE_POSIX_SPAWN:
+             raise OSError(
+                 errno.ENOTSUP, f"{sys.platform} does not support processes."
+             )
+@@ -1789,7 +1793,11 @@ def _posix_spawn(self, args, executable, env, restore_signals, close_fds,
+                          errread, errwrite):
+             """Execute program using os.posix_spawn()."""
+             kwargs = {}
+-            if restore_signals:
++            # python-wasm: this build has no sigset_t support (HAVE_SIGSET_T
++            # off), so os.posix_spawn rejects setsigdef. Signal restoration is
++            # moot for a host-spawned process, so it is intentionally skipped.
++            _PYWASM_NO_SIGSET = True
++            if restore_signals and not _PYWASM_NO_SIGSET:
+                 # See _Py_RestoreSignals() in Python/pylifecycle.c
+                 sigset = []
+                 for signame in ('SIGPIPE', 'SIGXFZ', 'SIGXFSZ'):

@@ -1,0 +1,234 @@
+name: build
+
+# Build + verify CI for python-wasm. Runs the wasmify pipeline against the
+# upstream `cpython/` submodule from a clean checkout, produces `python.wasm`
+# (the wasi-sdk-built CPython interpreter) and the wasm2go bundle
+# (`build/wasm2go/`, the transpiled pure-Go form go-python consumes), uploads
+# them as a workflow artifact, and attaches SLSA build-provenance attestations.
+# It does NOT publish a GitHub Release — release.yml owns that, on `v*` tags.
+#
+# Mirrors googlesql-wasm/.github/workflows/build.yml: the toolchain (wasi-sdk,
+# binaryen, buf, the wasmify CLI) lives inside the wasmify base image, so the
+# build runs entirely in a container. On top of that base image this workflow
+# maintains a project-specific cache image (ghcr.io/<owner>/python-wasm-cache)
+# keyed on the wasmify image tag + the cpython submodule SHA: a successful cold
+# build's container is `docker commit`ed so a warm run finishes incrementally
+# (the CPython wasi cross-build + the .wasmify object cache are restored)
+# instead of rebuilding CPython from scratch. Only `push` events publish the
+# cache image; `pull_request` runs may read it but never write.
+#
+# `docker run` (not the GHA `container:` directive) so a free-disk-space step
+# can run on the host before the container starts — the wasi-sdk toolchain plus
+# a full CPython build do not fit in the ~14 GB the runner ships with.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# This workflow only BUILDS and verifies (artifacts + provenance). It never
+# creates a GitHub Release — that is release.yml's job, gated to `v*` tags — so
+# pull requests and main pushes never publish. No `tags:` trigger here: a tag
+# push runs release.yml, which builds and releases in one place (no double
+# build, no race between two workflows uploading the same assets).
+
+permissions:
+  contents: read           # build-only: no release asset upload here
+  packages: write          # cache image push to ghcr
+  id-token: write          # actions/attest-build-provenance OIDC token
+  attestations: write
+
+env:
+  # Pinned to a released wasmify image. The cache image inherits this base layer
+  # via `docker commit`, and the tag is baked into the cache key so a wasmify
+  # upgrade rolls forward cleanly.
+  WASMIFY_IMAGE: ghcr.io/goccy/wasmify:v0.4.3
+  CACHE_IMAGE: ghcr.io/${{ github.repository_owner }}/python-wasm-cache
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space on the runner
+        # ubuntu-latest ships ~14 GB free on `/`; the image pull plus a full
+        # CPython wasm build blow past that.
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Resolve cache image tag from wasmify version + cpython submodule SHA
+        id: cache_key
+        run: |
+          submodule_sha=$(git -C cpython rev-parse HEAD)
+          wasmify_tag="${WASMIFY_IMAGE##*:}"
+          if [ -z "$wasmify_tag" ] || [ "$wasmify_tag" = "$WASMIFY_IMAGE" ]; then
+            wasmify_tag="untagged"
+          fi
+          echo "tag=${CACHE_IMAGE}:${wasmify_tag}-${submodule_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Try to pull cache image
+        # `docker pull` exits non-zero on a missing tag; a miss is not a
+        # failure, downstream steps branch on the recorded `hit` flag.
+        id: cache_pull
+        continue-on-error: true
+        run: |
+          if docker pull "${{ steps.cache_key.outputs.tag }}"; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore generated files from cache image (warm path)
+        # Cache hit: the cold build's .wasmify object cache and CPython
+        # cross-build live at /cache/output in the cache image. Copy them back
+        # so wasmify's incremental detection can short-circuit unchanged work.
+        if: steps.cache_pull.outputs.hit == 'true'
+        run: |
+          container=$(docker create "${{ steps.cache_key.outputs.tag }}")
+          docker cp "${container}:/cache/output/." "$PWD/"
+          docker rm -f "${container}"
+          ls -la .wasmify cpython/cross-build 2>/dev/null | head -10 || true
+
+      - name: Resolve build base image
+        id: base
+        run: |
+          if [ "${{ steps.cache_pull.outputs.hit }}" = "true" ]; then
+            echo "image=${{ steps.cache_key.outputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            docker pull "$WASMIFY_IMAGE"
+            echo "image=$WASMIFY_IMAGE" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run wasmify pipeline
+        # The same sequence as `make wasm`, regenerating every derived artefact
+        # (build.json, api-spec.json, proto/, bridge/, the wasm2go bundle) from
+        # source — so none of them are committed. Detached with `sleep infinity`
+        # so the post-build container can be `docker commit`ed (cache miss only).
+        # `buf generate --timeout 30m` overrides buf's 2-minute plugin timeout:
+        # protoc-gen-wasmify-go's wasm2go flavour SSA-lowers a large wasm and
+        # routinely runs several minutes.
+        run: |
+          docker run -d --name wasmify-build \
+            -v "$PWD:/work" -w /work \
+            -e WASMIFY_NON_INTERACTIVE=1 \
+            --entrypoint sleep \
+            "${{ steps.base.outputs.image }}" infinity
+          docker exec wasmify-build bash -ceuxo pipefail '
+            export WASMIFY_NO_EMSCRIPTEN_DEFINE=1 WASMIFY_NO_POSIX_COMPAT=1
+            make tools
+            bash scripts/wasi-configure.sh
+            wasmify build --non-interactive
+            wasmify generate-build
+            wasmify parse-headers --header py.h
+            wasmify gen-proto
+            wasmify wasm-build --with-bridge --optimize --non-interactive
+            # Clean tree before buf generate: protoc-gen-wasmify-go overwrites
+            # but never deletes, and the bundle file SET depends on the wasm size
+            # (single- vs multi-package layout). Stale files from a prior layout
+            # would not compile alongside the new ones.
+            rm -rf build
+            buf generate --timeout 30m
+            make bundle-gomod
+          '
+
+      - name: Commit and push cache image
+        # Cache miss + push events only. PR runs read the cache but never write.
+        # The bind-mount means /work writes are not in the committable layer, so
+        # copy the regenerable build state into a non-mounted path first.
+        id: cache_push
+        if: |
+          steps.cache_pull.outputs.hit != 'true' &&
+          github.event_name == 'push'
+        run: |
+          docker exec wasmify-build mkdir -p /cache/output/cpython
+          docker cp .wasmify "wasmify-build:/cache/output/"
+          if [ -d cpython/cross-build ]; then
+            docker cp cpython/cross-build "wasmify-build:/cache/output/cpython/"
+          fi
+          docker commit wasmify-build "${{ steps.cache_key.outputs.tag }}"
+          docker tag "${{ steps.cache_key.outputs.tag }}" "${CACHE_IMAGE}:latest"
+          push_out=$(docker push "${{ steps.cache_key.outputs.tag }}" | tee /dev/stderr)
+          digest=$(printf '%s\n' "$push_out" | grep -oE 'sha256:[a-f0-9]{64}' | head -n1)
+          if [ -z "$digest" ]; then
+            echo "::error::could not extract digest from docker push output" >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          docker push "${CACHE_IMAGE}:latest"
+
+      - name: Attest cache image build provenance
+        if: |
+          steps.cache_pull.outputs.hit != 'true' &&
+          github.event_name == 'push' &&
+          github.event.repository.visibility == 'public'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.CACHE_IMAGE }}
+          subject-digest: ${{ steps.cache_push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Stop build container
+        if: always()
+        run: docker rm -f wasmify-build 2>/dev/null || true
+
+      - name: Stage build artifacts
+        # Collect the build outputs for upload-artifact + provenance. These are
+        # the SAME files release.yml publishes as Release assets on a tag; here
+        # they are only uploaded as a workflow artifact and attested — never
+        # attached to a GitHub Release.
+        #   * python.wasm              — raw wasi-sdk artifact (binaryen-optimised).
+        #   * python_wasm2go.go        — the wasm2go bridge (build/wasm2go/python.go).
+        #   * python_wasm2go.tar.gz    — the build/wasm2go/internal/wasm2go bundle,
+        #                                a self-contained Go module after bundle-gomod
+        #                                (go.mod + the transpiled tree), which go-python
+        #                                downloads and extracts.
+        #   * python_wasm2go.sha256    — sha256sum manifest of the tarball contents;
+        #                                doubles as the attestation subject-checksums.
+        run: |
+          mkdir -p release
+          cp .wasmify/wasm-build/output/python.wasm release/python.wasm
+          cp build/wasm2go/python.go release/python_wasm2go.go
+          tar -czf release/python_wasm2go.tar.gz -C build/wasm2go/internal/wasm2go .
+          ( cd build/wasm2go/internal/wasm2go && find . -type f -print0 | sort -z \
+              | xargs -0 sha256sum ) > release/python_wasm2go.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-wasm-${{ github.sha }}
+          path: release/
+          if-no-files-found: error
+
+      - uses: actions/attest-build-provenance@v2
+        # Provenance only on `push` events and only when the repo is public.
+        if: github.event_name == 'push' && github.event.repository.visibility == 'public'
+        with:
+          subject-path: |
+            release/python.wasm
+            release/python_wasm2go.go
+
+      - uses: actions/attest-build-provenance@v2
+        # wasm2go bundle: one attestation whose subjects are the per-file digests
+        # in the manifest, so any file extracted from the tarball verifies
+        # individually.
+        if: github.event_name == 'push' && github.event.repository.visibility == 'public'
+        with:
+          subject-checksums: release/python_wasm2go.sha256
