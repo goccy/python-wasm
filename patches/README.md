@@ -14,7 +14,7 @@ checkout / `git submodule update` / CPython version bump reproduces them.
 | `0002-subprocess-wasi-posix_spawn.patch` | `subprocess` hard-refuses on `sys.platform == "wasi"` (`_can_fork_exec` is False) before reaching the `posix_spawn` path. Allow the posix_spawn path, populate `_del_safe` from the real `os` functions when `waitpid` exists, and skip the `setsigdef` step (no `sigset_t` support on this build). |
 
 The actual process spawning is provided by the bridge shim
-(`embed/pyembed.cc`, compiled with `-DWASMIFY_HOST_SUBPROCESS`) backed by the
+(`py.c`, compiled with `-DWASMIFY_HOST_SUBPROCESS`) backed by the
 `proc_spawn`/`proc_wait` host imports. See `scripts/wasi-configure.sh` for the
 matching pyconfig.h flags.
 

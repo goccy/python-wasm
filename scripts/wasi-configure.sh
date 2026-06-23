@@ -16,7 +16,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 CPY="$HERE/cpython"
-: "${WASI_SDK_PATH:?WASI_SDK_PATH must be set}"
+: "${WASI_SDK_PATH:=$HOME/.config/wasmify/bin/wasi-sdk}"
 SYSROOT="$WASI_SDK_PATH/share/wasi-sysroot"
 HOST_TRIPLE="wasm32-wasip1"
 # Must match the directory CPython's wasi tool builds build-python into. That
@@ -99,7 +99,12 @@ SYSCONFIG_DATA="$HOST_TRIPLE relative"  # placeholder; built below
 WASI_REL="cross-build/$HOST_TRIPLE"
 SYSCONFIG_DATA_DIR="$WASI_REL/build/lib.wasi-wasm32-$PYVER"
 
-WASMTIME="$(command -v wasmtime)"
+# HOSTRUNNER is only invoked by CPython's `test` targets (running python.wasm
+# under wasmtime); `make all` does its freezing/sysconfig with the host
+# build-python, so a wasm-build does NOT need wasmtime. Don't hard-require it
+# here (the toolchain image ships without it) — fall back to the bare name so
+# the config string is well-formed; it is simply never executed during the build.
+WASMTIME="$(command -v wasmtime || echo wasmtime)"
 HOSTRUNNER="$WASMTIME run --wasm max-wasm-stack=16777216 --dir $CPY::/ --env PYTHONPATH=/$SYSCONFIG_DATA_DIR"
 
 # ---------------------------------------------------------------------------
@@ -150,7 +155,7 @@ echo "== configuring wasi (by-name CC=clang CXX=clang++ AR=ar)"
 # Gated on the SAME opt-in as the bridge socket shim: wasmify.json's
 # bridge.HostSockets. When false (or absent), we leave HAVE_SOCKET etc. off so
 # socketmodule keeps CPython's ENOTSUP stubs and the wasm imports only standard
-# wasi (portable). When true, the bridge (embed/pyembed.cc, compiled with
+# wasi (portable). When true, the bridge (py.c, compiled with
 # -DWASMIFY_HOST_SOCKETS) supplies socket()/connect()/getaddrinfo() backed by
 # host imports, so we flip the macros on and add the prototypes + constants a
 # real <netdb.h> would (absent on wasip1). Keeping the two in sync avoids a
@@ -169,9 +174,10 @@ if [ "$HOST_SOCKETS_OPTIN" = "1" ] && [ -f "$PYCONFIG" ] && ! grep -q PYWASM_HOS
   cat >> "$PYCONFIG" <<'PYCONF_EOF'
 
 /* python-wasm: host-provided outbound socket API (definitions in the bridge,
- * embed/pyembed.cc, calling host imports backed by Go's net package). wasi-libc
- * omits these under __wasip1__; addrinfo.h omits AI_*/EAI_* once HAVE_GETADDRINFO
- * is set. struct addrinfo still comes from CPython's Modules/addrinfo.h. */
+ * py.c, calling host imports backed by Go's net package). wasi-libc
+ * omits these under __wasip1__; addrinfo.h omits the AI_ and EAI_ constants
+ * once HAVE_GETADDRINFO is set. struct addrinfo still comes from CPython's
+ * Modules/addrinfo.h. */
 #ifndef PYWASM_HOST_SOCKET_DECLS
 #define PYWASM_HOST_SOCKET_DECLS
 #ifndef SO_ERROR

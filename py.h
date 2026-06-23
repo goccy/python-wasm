@@ -1,4 +1,4 @@
-/* pyembed.h — thin CPython embedding API exported to wasm / Go.
+/* py.h — thin CPython embedding API exported to wasm / Go.
  *
  * This is the ONLY surface wasmify exports from libpython. CPython's full
  * C API stays internal; Go callers see just these functions. Pinned against

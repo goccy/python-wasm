@@ -1,7 +1,7 @@
-/* pyembed.cc — implementation of the thin CPython embedding API (C++).
- * Pinned against CPython v3.14.6. See pyembed.h for the contract. */
+/* py.c — implementation of the thin CPython embedding API (C++).
+ * Pinned against CPython v3.14.6. See py.h for the contract. */
 
-#include "pyembed.h"
+#include "py.h"
 
 #include <Python.h>
 
@@ -176,7 +176,7 @@ uint64_t py_new(const char *stdlib_dir) {
     PyStatus status = Py_InitializeFromConfig(&config);
     PyConfig_Clear(&config);
     if (PyStatus_Exception(status)) {
-        fprintf(stderr, "[pyembed] Py_InitializeFromConfig failed: func=%s err_msg=%s exitcode=%d\n",
+        fprintf(stderr, "[py] Py_InitializeFromConfig failed: func=%s err_msg=%s exitcode=%d\n",
                 status.func ? status.func : "(nil)",
                 status.err_msg ? status.err_msg : "(nil)",
                 status.exitcode);
