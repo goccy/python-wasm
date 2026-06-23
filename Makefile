@@ -56,12 +56,21 @@ WASMIFY_PIPELINE = \
 # larger wasm yields the base/ + pN multi-package layout). Mixing the two leftover
 # sets in one package does not compile.
 
-.PHONY: all wasm wasm-clean tools bundle-gomod image-pull help
+.PHONY: all wasm wasm-clean tools bundle-gomod stdlib-zip image-pull help
 
 # Install the tools wasmify.json declares (wasi-sdk; pre-baked in the image).
 # Safe to re-run; already-installed tools are skipped.
 tools:
 	wasmify ensure-tools ./cpython --output-dir .
+
+# Build the embeddable stdlib zip from the cpython submodule's Lib/ tree. CI's
+# build.yml/release.yml run this same script when staging artifacts; this target
+# is for local parity. Deterministic: same checkout -> byte-identical output.
+# NOTE: run `bash scripts/wasi-configure.sh` first so Lib/subprocess.py carries
+# the host-subprocess patch — otherwise the zip embeds vanilla subprocess.py and
+# breaks go-python's subprocess path.
+stdlib-zip:
+	python3 scripts/make-stdlib-zip.py cpython/Lib python_stdlib.zip
 
 # Build python.wasm + the wasm2go bundle from a clean checkout, exactly the way
 # .github/workflows/build.yml does. Outputs:

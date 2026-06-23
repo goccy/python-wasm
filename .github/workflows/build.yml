@@ -203,6 +203,10 @@ jobs:
         #                                downloads and extracts.
         #   * python_wasm2go.sha256    — sha256sum manifest of the tarball contents;
         #                                doubles as the attestation subject-checksums.
+        #   * python_stdlib.zip        — trimmed CPython Lib/ tree (the pure-Python
+        #                                stdlib), locked to the pinned cpython
+        #                                submodule version, that go-python embeds as
+        #                                the interpreter's module search path.
         run: |
           mkdir -p release
           cp .wasmify/wasm-build/output/python.wasm release/python.wasm
@@ -210,6 +214,13 @@ jobs:
           tar -czf release/python_wasm2go.tar.gz -C build/wasm2go/internal/wasm2go .
           ( cd build/wasm2go/internal/wasm2go && find . -type f -print0 | sort -z \
               | xargs -0 sha256sum ) > release/python_wasm2go.sha256
+          # cpython/Lib here is the bind-mounted tree wasi-configure.sh already
+          # patched in the build step above, so the zip carries the host-subprocess
+          # subprocess.py the wasm was built against. Guard it: a vanilla
+          # subprocess.py would silently break go-python's subprocess path.
+          python3 scripts/make-stdlib-zip.py cpython/Lib release/python_stdlib.zip
+          unzip -p release/python_stdlib.zip subprocess.py | grep -q _PYWASM_NO_SIGSET \
+            || { echo "::error::python_stdlib.zip subprocess.py is not the host-subprocess-patched build"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -224,6 +235,7 @@ jobs:
           subject-path: |
             release/python.wasm
             release/python_wasm2go.go
+            release/python_stdlib.zip
 
       - uses: actions/attest-build-provenance@v2
         # wasm2go bundle: one attestation whose subjects are the per-file digests
