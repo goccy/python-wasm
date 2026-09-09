@@ -1,7 +1,7 @@
 # Container image shipping every toolchain wasmify needs (wasi-sdk + binaryen +
 # buf + the wasmify CLI itself). Override locally to pin a SHA or to iterate on a
 # wasmify branch — e.g. `make wasm IMAGE=localhost:5001/wasmify:local`.
-IMAGE ?= ghcr.io/goccy/wasmify:v0.5.1
+IMAGE ?= ghcr.io/goccy/wasmify:v0.6.16
 
 # Resource limits for the container that runs the pipeline. A full CPython wasm
 # build peaks well under MEMORY; CPUS bounds make's parallelism.
@@ -19,7 +19,11 @@ PLATFORM_FLAG := $(if $(DOCKER_PLATFORM),--platform=$(DOCKER_PLATFORM),)
 # declaring the import path its own `import` / `//go:linkname` sites embed.
 # wasmify writes that path into wasmify.json's bridge.Wasm2GoImportPath, which
 # the codegen reads back; derive it from the JSON so the two never drift.
-WASM2GO_BUNDLE_DIR    := build/wasm2go/internal/wasm2go
+# The generated tree nests under the GoPackage's package directory
+# ("internal", from bridge.GoPackage = github.com/goccy/go-python/internal):
+# build/wasm2go/internal/python.go is the service binding for go-python, and
+# the self-contained wasm2go bundle module sits one level below it.
+WASM2GO_BUNDLE_DIR    := build/wasm2go/internal/internal/wasm2go
 WASM2GO_BUNDLE_GO_VER := 1.25.0
 
 # CPython-specific build env, exported into every pipeline phase:
@@ -43,12 +47,22 @@ WASMIFY_PIPELINE = \
 	$(BUILD_ENV) bash scripts/wasi-configure.sh && \
 	$(BUILD_ENV) wasmify build --non-interactive && \
 	wasmify generate-build && \
-	wasmify parse-headers --header py.h && \
+	wasmify parse-headers --header py.h --clang $(WASI_CLANG) && \
 	wasmify gen-proto && \
-	$(BUILD_ENV) wasmify wasm-build --with-bridge --optimize --non-interactive && \
+	$(BUILD_ENV) wasmify wasm-build --optimize --non-interactive && \
 	rm -rf build && \
-	buf generate && \
+	buf generate --timeout 0 && \
 	make bundle-gomod
+# `buf generate --timeout 0`: buf's default two-minute plugin timeout SIGKILLs
+# protoc-gen-wasmify-go mid-transpile on a wasm this size and reports only
+# "signal: killed".
+
+# parse-headers runs clang over py.h with the flags the build captured, which
+# include the wasm target and --sysroot. A host clang (Apple clang in
+# particular) rejects those, so point it at wasi-sdk's clang — the same
+# compiler that built the archives. Works both in the container and on a bare
+# host (wasmify ensure-tools installs the sdk there).
+WASI_CLANG = $${WASI_SDK_PATH:-$$HOME/.config/wasmify/bin/wasi-sdk}/bin/clang
 # `rm -rf build` so `buf generate` writes the wasm2go bundle into a CLEAN tree:
 # protoc-gen-wasmify-go overwrites the files it emits but never deletes stale
 # ones, and the bundle's file SET depends on the wasm's size (a sub-threshold
@@ -56,7 +70,7 @@ WASMIFY_PIPELINE = \
 # larger wasm yields the base/ + pN multi-package layout). Mixing the two leftover
 # sets in one package does not compile.
 
-.PHONY: all wasm wasm-clean tools bundle-gomod stdlib-zip image-pull help
+.PHONY: all wasm wasm-host wasm-clean tools bundle-gomod stdlib-zip image-pull help
 
 # Install the tools wasmify.json declares (wasi-sdk; pre-baked in the image).
 # Safe to re-run; already-installed tools are skipped.
@@ -75,8 +89,9 @@ stdlib-zip:
 # Build python.wasm + the wasm2go bundle from a clean checkout, exactly the way
 # .github/workflows/build.yml does. Outputs:
 #   .wasmify/wasm-build/output/python.wasm
-#   build/wasm2go/                                <- wasm2go bridge + bundle
-#   build/wasm2go/internal/wasm2go/go.mod         <- bundle module manifest
+#   build/wasm2go/                                   <- wasm2go bridge + bundle
+#   build/wasm2go/internal/python.go                 <- service binding (go-python/internal)
+#   build/wasm2go/internal/internal/wasm2go/go.mod   <- bundle module manifest
 wasm:
 	docker run --rm $(PLATFORM_FLAG) \
 		-v $(CURDIR):/work -w /work \
@@ -84,6 +99,19 @@ wasm:
 		-e WASMIFY_NON_INTERACTIVE=1 \
 		$(IMAGE) \
 		bash -c '$(WASMIFY_PIPELINE)'
+
+# Same pipeline, run directly on the host — much faster than the container on
+# an Apple Silicon machine (the image is linux/amd64 and runs emulated there).
+# Requirements, matching what the image ships:
+#   * the wasmify CLI and protoc-gen-wasmify-go on PATH, built from the SAME
+#     wasmify version as $(IMAGE):
+#       go install github.com/goccy/wasmify/cmd/wasmify@vX.Y.Z
+#       go install github.com/goccy/wasmify/protoc-plugins/protoc-gen-wasmify-go@vX.Y.Z
+#   * buf, python3, make on PATH
+#   * wasi-sdk — `make tools` (the pipeline's first step) installs it under
+#     ~/.config/wasmify/bin/wasi-sdk if missing.
+wasm-host:
+	bash -c '$(WASMIFY_PIPELINE)'
 
 # Write go.mod into the wasm2go bundle so the released tarball is a
 # self-contained Go module. Parses bridge.Wasm2GoImportPath out of wasmify.json
@@ -120,6 +148,7 @@ all: wasm
 help:
 	@echo 'Targets:'
 	@echo '  wasm         Build python.wasm + wasm2go bundle inside $(IMAGE)'
+	@echo '  wasm-host    Same pipeline on the host (wasmify + buf on PATH)'
 	@echo '  wasm-clean   Drop generated artefacts; keep committed inputs'
 	@echo '  image-pull   docker pull $(IMAGE)'
 	@echo ''

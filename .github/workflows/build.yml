@@ -44,7 +44,7 @@ env:
   # Pinned to a released wasmify image. The cache image inherits this base layer
   # via `docker commit`, and the tag is baked into the cache key so a wasmify
   # upgrade rolls forward cleanly.
-  WASMIFY_IMAGE: ghcr.io/goccy/wasmify:v0.5.1
+  WASMIFY_IMAGE: ghcr.io/goccy/wasmify:v0.6.16
   CACHE_IMAGE: ghcr.io/${{ github.repository_owner }}/python-wasm-cache
 
 jobs:
@@ -140,7 +140,7 @@ jobs:
             wasmify generate-build
             wasmify parse-headers --header py.h
             wasmify gen-proto
-            wasmify wasm-build --with-bridge --optimize --non-interactive
+            wasmify wasm-build --optimize --non-interactive
             # Clean tree before buf generate: protoc-gen-wasmify-go overwrites
             # but never deletes, and the bundle file SET depends on the wasm size
             # (single- vs multi-package layout). Stale files from a prior layout
@@ -196,8 +196,9 @@ jobs:
         # they are only uploaded as a workflow artifact and attested — never
         # attached to a GitHub Release.
         #   * python.wasm              — raw wasi-sdk artifact (binaryen-optimised).
-        #   * python_wasm2go.go        — the wasm2go bridge (build/wasm2go/python.go).
-        #   * python_wasm2go.tar.gz    — the build/wasm2go/internal/wasm2go bundle,
+        #   * python_wasm2go.go        — the wasm2go bridge (build/wasm2go/internal/python.go,
+#                                go-python's internal service binding).
+        #   * python_wasm2go.tar.gz    — the build/wasm2go/internal/internal/wasm2go bundle,
         #                                a self-contained Go module after bundle-gomod
         #                                (go.mod + the transpiled tree), which go-python
         #                                downloads and extracts.
@@ -210,9 +211,9 @@ jobs:
         run: |
           mkdir -p release
           cp .wasmify/wasm-build/output/python.wasm release/python.wasm
-          cp build/wasm2go/python.go release/python_wasm2go.go
-          tar -czf release/python_wasm2go.tar.gz -C build/wasm2go/internal/wasm2go .
-          ( cd build/wasm2go/internal/wasm2go && find . -type f -print0 | sort -z \
+          cp build/wasm2go/internal/python.go release/python_wasm2go.go
+          tar -czf release/python_wasm2go.tar.gz -C build/wasm2go/internal/internal/wasm2go .
+          ( cd build/wasm2go/internal/internal/wasm2go && find . -type f -print0 | sort -z \
               | xargs -0 sha256sum ) > release/python_wasm2go.sha256
           # cpython/Lib here is the bind-mounted tree wasi-configure.sh already
           # patched in the build step above, so the zip carries the host-subprocess

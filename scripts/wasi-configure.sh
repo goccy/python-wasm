@@ -20,14 +20,20 @@ CPY="$HERE/cpython"
 SYSROOT="$WASI_SDK_PATH/share/wasi-sysroot"
 HOST_TRIPLE="wasm32-wasip1"
 # Must match the directory CPython's wasi tool builds build-python into. That
-# tool (Tools/wasm/wasi) names it by sysconfig BUILD_GNU_TYPE — i.e. config.guess
-# (e.g. x86_64-pc-linux-gnu) — NOT `cc -dumpmachine`, which spells it differently
-# on Linux (x86_64-linux-gnu) and would leave us looking in the wrong cross-build
-# dir. Use config.guess to stay in lock-step; fall back to dumpmachine if absent.
-if [ -x "$CPY/config.guess" ] || [ -f "$CPY/config.guess" ]; then
-  BUILD_TRIPLE="$(sh "$CPY/config.guess")"
-else
-  BUILD_TRIPLE="$(cc -dumpmachine)"
+# tool (Tools/wasm/wasi) names it by the BUILD_GNU_TYPE sysconfig variable of
+# the python3 that runs it (e.g. x86_64-pc-linux-gnu) — NOT `cc -dumpmachine`,
+# which spells it differently on Linux (x86_64-linux-gnu). Ask the same python3
+# for the same variable so the two never disagree (a shell running under
+# Rosetta on Apple Silicon, for instance, makes config.guess answer x86_64
+# while an arm64 python3 builds into aarch64-apple-darwin*); fall back to
+# config.guess, then dumpmachine.
+BUILD_TRIPLE="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("BUILD_GNU_TYPE") or "")' 2>/dev/null || true)"
+if [ -z "$BUILD_TRIPLE" ]; then
+  if [ -x "$CPY/config.guess" ] || [ -f "$CPY/config.guess" ]; then
+    BUILD_TRIPLE="$(sh "$CPY/config.guess")"
+  else
+    BUILD_TRIPLE="$(cc -dumpmachine)"
+  fi
 fi
 
 CROSS="$CPY/cross-build"
@@ -38,18 +44,27 @@ echo "== build triple: $BUILD_TRIPLE"
 echo "== wasi sdk:     $WASI_SDK_PATH"
 
 # ---------------------------------------------------------------------------
-# Host-subprocess CPython source patches (idempotent).
+# Host-capability CPython source patches (idempotent).
 #
-# Enabling host-provided subprocess needs two small CPython source changes that
-# can't be expressed as config: posixmodule.c's posix_spawn helper functions
-# are guarded by HAVE_EXECV (off on wasi), and subprocess.py hard-refuses to
-# run on the "wasi" platform before reaching the posix_spawn path. These live
-# as patches/ here (rather than uncommitted edits in the cpython submodule) so
-# a fresh checkout / submodule reset reproduces them. Applied only when host
-# subprocess is opted in, and skipped if already applied.
+# Enabling a host capability sometimes needs a small CPython source change
+# that can't be expressed as config. They live as patches/<capability>/ here
+# (rather than uncommitted edits in the cpython submodule) so a fresh checkout
+# / submodule reset reproduces them, and each directory is applied only when
+# its capability is opted in in wasmify.json; a patch already present is
+# skipped.
+#
+#   patches/host-subprocess/  posixmodule.c's posix_spawn helper functions are
+#                             guarded by HAVE_EXECV (off on wasi), and
+#                             subprocess.py hard-refuses to run on the "wasi"
+#                             platform before reaching the posix_spawn path.
+#   patches/host-sockets/     socketmodule.c's socket.getnameinfo needs a
+#                             helper that upstream only compiles alongside
+#                             gethostbyname; wasmify's shim provides
+#                             getnameinfo without gethostbyname.
 # ---------------------------------------------------------------------------
-if [ -f "$HERE/wasmify.json" ] && grep -qE '"HostSubprocess"[[:space:]]*:[[:space:]]*true' "$HERE/wasmify.json"; then
-  for patch in "$HERE"/patches/*.patch; do
+apply_patches() {
+  local dir="$1"
+  for patch in "$dir"/*.patch; do
     [ -f "$patch" ] || continue
     if git -C "$CPY" apply --reverse --check "$patch" 2>/dev/null; then
       echo "== cpython patch already applied: $(basename "$patch")"
@@ -59,6 +74,12 @@ if [ -f "$HERE/wasmify.json" ] && grep -qE '"HostSubprocess"[[:space:]]*:[[:spac
       echo "!! WARNING: could not apply cpython patch: $(basename "$patch")" >&2
     fi
   done
+}
+if [ -f "$HERE/wasmify.json" ] && grep -qE '"HostSubprocess"[[:space:]]*:[[:space:]]*true' "$HERE/wasmify.json"; then
+  apply_patches "$HERE/patches/host-subprocess"
+fi
+if [ -f "$HERE/wasmify.json" ] && grep -qE '"HostSockets"[[:space:]]*:[[:space:]]*true' "$HERE/wasmify.json"; then
+  apply_patches "$HERE/patches/host-sockets"
 fi
 
 # ---------------------------------------------------------------------------
@@ -155,12 +176,13 @@ echo "== configuring wasi (by-name CC=clang CXX=clang++ AR=ar)"
 # Gated on the SAME opt-in as the bridge socket shim: wasmify.json's
 # bridge.HostSockets. When false (or absent), we leave HAVE_SOCKET etc. off so
 # socketmodule keeps CPython's ENOTSUP stubs and the wasm imports only standard
-# wasi (portable). When true, the bridge (py.cc, compiled with
+# wasi (portable). When true, wasmify's host-sockets shim (compiled with
 # -DWASMIFY_HOST_SOCKETS) supplies socket()/connect()/getaddrinfo() backed by
-# host imports, so we flip the macros on and add the prototypes + constants a
-# real <netdb.h> would (absent on wasip1). Keeping the two in sync avoids a
-# link error (socketmodule referencing socket() with no shim providing it).
-# Idempotent: re-running configure re-patches.
+# host imports, so we flip the macros on and route socketmodule through the
+# same <netdb.h> the shim uses (see the block below for the two shapes).
+# Keeping the two in sync avoids a link error (socketmodule referencing
+# socket() with no shim providing it). Idempotent: re-running configure
+# re-patches.
 PYCONFIG="$WASI_DIR/pyconfig.h"
 HOST_SOCKETS_OPTIN=0
 if [ -f "$HERE/wasmify.json" ] && grep -qE '"HostSockets"[[:space:]]*:[[:space:]]*true' "$HERE/wasmify.json"; then
@@ -173,16 +195,57 @@ if [ "$HOST_SOCKETS_OPTIN" = "1" ] && [ -f "$PYCONFIG" ] && ! grep -q PYWASM_HOS
   perl -0pi -e 's{/\* \#undef HAVE_GETADDRINFO \*/}{#define HAVE_GETADDRINFO 1}' "$PYCONFIG"
   cat >> "$PYCONFIG" <<'PYCONF_EOF'
 
-/* python-wasm: host-provided outbound socket API (definitions in the bridge,
- * py.cc, calling host imports backed by Go's net package). wasi-libc
- * omits these under __wasip1__; addrinfo.h omits the AI_ and EAI_ constants
- * once HAVE_GETADDRINFO is set. struct addrinfo still comes from CPython's
- * Modules/addrinfo.h. */
+/* python-wasm: host-provided outbound socket API (definitions in wasmify's
+ * host-sockets shim, calling host imports backed by Go's net package).
+ * wasi-libc omits these under __wasip1__.
+ *
+ * Two shapes, selected by WASMIFY_HOST_SOCKETS — the macro wasmify defines
+ * for every compile it drives when bridge.HostSockets is on (the captured
+ * `wasmify build` and the wasm-build replay alike), together with its
+ * <netdb.h> stub on the include path:
+ *
+ *   with the macro: that <netdb.h> is the layout contract wasmify's socket
+ *   shim fills getaddrinfo() results into. Route socketmodule through the
+ *   same header: HAVE_NETDB_H makes socketmodule.c #include <netdb.h>,
+ *   HAVE_ADDRINFO makes Modules/addrinfo.h skip its own (RFC 2553-ordered)
+ *   struct addrinfo, and the AI_/EAI_ values and the getaddrinfo family
+ *   prototypes come from the shared header, so the module and the shim agree
+ *   on struct addrinfo by construction. HAVE_GETNAMEINFO selects the shim's
+ *   getnameinfo() over CPython's fallback Modules/getnameinfo.c, which
+ *   assumes a full netdb (servent/getservbyport) once netdb.h exists (the
+ *   host-sockets patch lets socket.getnameinfo build without gethostbyname).
+ *   Only socket()/connect() — which the sysroot's <sys/socket.h> guards out
+ *   — are declared here.
+ *
+ *   without the macro (a compile wasmify does not drive): no netdb.h exists
+ *   anywhere, so declare the standalone constants and prototypes that let
+ *   socketmodule compile with HAVE_GETADDRINFO against the bare sysroot;
+ *   struct addrinfo comes from Modules/addrinfo.h. */
 #ifndef PYWASM_HOST_SOCKET_DECLS
 #define PYWASM_HOST_SOCKET_DECLS
 #ifndef SO_ERROR
 #define SO_ERROR 4
 #endif
+#ifdef WASMIFY_HOST_SOCKETS
+#ifndef HAVE_NETDB_H
+#define HAVE_NETDB_H 1
+#endif
+#ifndef HAVE_ADDRINFO
+#define HAVE_ADDRINFO 1
+#endif
+#ifndef HAVE_GETNAMEINFO
+#define HAVE_GETNAMEINFO 1
+#endif
+#ifdef __cplusplus
+extern "C" {
+#endif
+struct sockaddr;
+int socket(int, int, int);
+int connect(int, const struct sockaddr *, unsigned int);
+#ifdef __cplusplus
+}
+#endif
+#else /* !WASMIFY_HOST_SOCKETS */
 #ifndef EAI_NONAME
 #define EAI_ADDRFAMILY 1
 #define EAI_AGAIN 2
@@ -225,6 +288,7 @@ int getnameinfo(const struct sockaddr *, unsigned int, char *, unsigned int, cha
 #ifdef __cplusplus
 }
 #endif
+#endif /* WASMIFY_HOST_SOCKETS */
 #endif /* PYWASM_HOST_SOCKET_DECLS */
 PYCONF_EOF
 fi
@@ -299,3 +363,19 @@ chmod 755 "$WASI_DIR/python.sh"
 
 echo "== configure done; CC line in Makefile:"
 grep -m1 '^CC=' "$WASI_DIR/Makefile"
+
+# ---------------------------------------------------------------------------
+# 4. Start the captured build from a clean object tree.
+#
+# `wasmify build` learns the compile and archive steps by wrapping the
+# compiler while `make` runs, and its log holds ONLY what make executed this
+# time. An incremental make over objects left by an earlier run therefore
+# yields an incomplete capture: the objects make considered up to date never
+# reach build.json, the archives wasmify rebuilds lack them, and the link
+# silently turns their symbols into host imports (observed: a warm tree
+# dropped the _hacl hash objects, and hashlib then called into stubs).
+# Clean the wasm build dir here so the capture that follows is always the
+# whole build. The host build-python (a different directory) is untouched.
+# ---------------------------------------------------------------------------
+echo "== cleaning the wasm build dir so the capture covers every step"
+make -C "$WASI_DIR" clean >/dev/null
