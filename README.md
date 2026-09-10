@@ -45,7 +45,7 @@ The full pipeline runs inside a wasmify image bundling wasi-sdk, binaryen, buf,
 and the wasmify CLI — you install none of those on your host:
 
 ```sh
-make wasm                              # uses ghcr.io/goccy/wasmify:v0.6.16
+make wasm                              # uses ghcr.io/goccy/wasmify:v0.6.17
 make wasm DOCKER_PLATFORM=linux/amd64  # on Apple Silicon (the image is amd64-only)
 make wasm-clean                        # drop regenerated outputs, keep committed inputs
 make wasm-host                         # same pipeline on the host (wasmify, protoc-gen-wasmify-go,
